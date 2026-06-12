@@ -483,6 +483,7 @@ let msgId = 1;
 let pendingRequests = {};
 let authChallenge = null;
 let authSalt = null;
+let waitingForStopConfirm = false;  // prevents double-restart
 
 // Ring math
 const RING = document.getElementById('ring');
@@ -652,9 +653,10 @@ async function doConnect() {
         const pass    = document.getElementById('ws-pass').value;
         const b64pass = await sha256base64(pass + authSalt);
         const auth    = await sha256base64(b64pass + authChallenge);
-        ws.send(JSON.stringify({ op: 1, d: { rpcVersion: 1, authentication: auth, eventSubscriptions: 0 } }));
+        // 65536 = Subscribe to all events (catches RecordStateChanged)
+        ws.send(JSON.stringify({ op: 1, d: { rpcVersion: 1, authentication: auth, eventSubscriptions: 65536 } }));
       } else {
-        ws.send(JSON.stringify({ op: 1, d: { rpcVersion: 1, eventSubscriptions: 0 } }));
+        ws.send(JSON.stringify({ op: 1, d: { rpcVersion: 1, eventSubscriptions: 65536 } }));
       }
     } else if (op === 2) { // Identified
       connected = true;
@@ -674,9 +676,26 @@ async function doConnect() {
         pendingRequests[rid](d);
         delete pendingRequests[rid];
       }
-    } else if (op === 5) { // Event — not used but log errors
+    } else if (op === 5) { // Event
       if (d.eventType === 'RecordStateChanged') {
-        log(`Record state: ${d.eventData?.outputState}`);
+        const state = d.eventData?.outputState;
+        log(`OBS record state → ${state}`);
+
+        // OBS confirmed the recording has fully stopped
+        if ((state === 'OBS_WEBSOCKET_OUTPUT_STOPPED' || state === 'stopped') && waitingForStopConfirm) {
+          waitingForStopConfirm = false;
+          log('OBS confirmed stop ✓ — scheduling next session…', 'ok');
+          if (isAutoRestart() && connected) {
+            setTimeout(() => startSession(), 1200);
+          } else {
+            setUIState('idle');
+          }
+        }
+
+        // If OBS started recording externally, sync UI
+        if (state === 'OBS_WEBSOCKET_OUTPUT_STARTED' || state === 'started') {
+          if (appState !== 'recording') log('OBS started recording externally.', 'warn');
+        }
       }
     }
   };
@@ -774,18 +793,30 @@ async function endRecording() {
   setUIState('done');
   updateClock(0);
   setRing(0);
+
+  // Mark that we are waiting for OBS to confirm the stop via event
+  waitingForStopConfirm = true;
+
   const res = await sendOBS('StopRecord');
+  if (!res || !res.requestStatus?.result) {
+    const err = res?.requestStatus?.comment || 'Unknown error';
+    log(`StopRecord warning: ${err}`, 'warn');
+  }
   log(`Session #${sessionCount} complete (${fmtDur(getRecSeconds())}).`, 'ok');
   showToast(`✅ Session #${sessionCount} complete!`);
 
-  if (isAutoRestart()) {
-    log('Auto-restarting in 1s…');
-    setTimeout(() => {
-      if (connected) startSession();
-    }, 1200);
-  } else {
-    setUIState('idle');
-  }
+  // Safety fallback: if OBS event never arrives within 5s, proceed anyway
+  setTimeout(() => {
+    if (waitingForStopConfirm) {
+      waitingForStopConfirm = false;
+      log('OBS stop event timeout — proceeding anyway…', 'warn');
+      if (isAutoRestart() && connected) {
+        setTimeout(() => startSession(), 1000);
+      } else {
+        setUIState('idle');
+      }
+    }
+  }, 5000);
 }
 
 async function stopAll() {
