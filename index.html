@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OBS Auto-Recording Timer</title>
+  <meta name="description" content="Automatically start and stop OBS recording on a 10m 01s loop with a 5-second pre-roll countdown." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:          #0a0c12;
+      --bg2:         #111420;
+      --glass:       rgba(255,255,255,0.04);
+      --glass-b:     rgba(255,255,255,0.08);
+      --red:         #ff3b3b;
+      --red-glow:    rgba(255,59,59,0.35);
+      --blue:        #3b82f6;
+      --blue-glow:   rgba(59,130,246,0.35);
+      --green:       #22c55e;
+      --green-glow:  rgba(34,197,94,0.35);
+      --yellow:      #f59e0b;
+      --text:        #e2e8f0;
+      --muted:       #64748b;
+      --radius:      16px;
+      --dur-rec:     601; /* 10m01s in seconds */
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', sans-serif;
+      overflow-x: hidden;
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 24px;
+      background:
+        radial-gradient(ellipse 80% 50% at 20% 10%, rgba(59,130,246,0.08) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 40% at 80% 90%, rgba(255,59,59,0.06) 0%, transparent 60%),
+        var(--bg);
+    }
+
+    /* ── GRID LAYOUT ── */
+    .app {
+      width: 100%;
+      max-width: 520px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* ── GLASS CARD ── */
+    .card {
+      background: var(--glass);
+      border: 1px solid var(--glass-b);
+      border-radius: var(--radius);
+      backdrop-filter: blur(20px);
+      padding: 20px 24px;
+      transition: border-color 0.3s;
+    }
+    .card:hover { border-color: rgba(255,255,255,0.14); }
+
+    /* ── HEADER ── */
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 16px 24px;
+    }
+    .header-icon {
+      width: 36px; height: 36px;
+      background: linear-gradient(135deg, var(--red), #c0392b);
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px;
+      box-shadow: 0 4px 20px var(--red-glow);
+    }
+    .header h1 {
+      font-size: 17px; font-weight: 600; letter-spacing: -0.3px;
+    }
+    .header p { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+    /* ── STATUS DOT ── */
+    .status-row {
+      display: flex; align-items: center; gap: 8px;
+      margin-left: auto;
+    }
+    .dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: var(--muted);
+      transition: background 0.4s, box-shadow 0.4s;
+    }
+    .dot.connected    { background: var(--green); box-shadow: 0 0 8px var(--green-glow); }
+    .dot.recording    { background: var(--red);   box-shadow: 0 0 8px var(--red-glow); animation: pulse-dot 1s infinite; }
+    .dot.error        { background: var(--red);   box-shadow: 0 0 8px var(--red-glow); }
+    .dot.countdown    { background: var(--yellow); box-shadow: 0 0 8px rgba(245,158,11,0.5); }
+    @keyframes pulse-dot {
+      0%,100% { transform: scale(1); opacity: 1; }
+      50%      { transform: scale(1.5); opacity: 0.6; }
+    }
+    #status-label { font-size: 12px; color: var(--muted); }
+
+    /* ── CONNECTION CARD ── */
+    .conn-grid {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: end;
+    }
+    label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; display: block; margin-bottom: 6px; }
+    input[type="text"], input[type="password"] {
+      width: 100%;
+      background: rgba(0,0,0,0.3);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 8px;
+      padding: 9px 12px;
+      color: var(--text);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    input:focus {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 3px rgba(59,130,246,0.18);
+    }
+    .fields { display: flex; flex-direction: column; gap: 10px; }
+
+    /* ── BUTTONS ── */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      gap: 6px;
+      border: none; border-radius: 9px; cursor: pointer;
+      font-family: 'Inter', sans-serif; font-weight: 600;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+    .btn:active { transform: scale(0.96); }
+
+    .btn-connect {
+      padding: 9px 18px; font-size: 13px;
+      background: linear-gradient(135deg, var(--blue), #2563eb);
+      color: #fff;
+      box-shadow: 0 4px 16px var(--blue-glow);
+      height: 38px;
+    }
+    .btn-connect:hover { box-shadow: 0 6px 22px var(--blue-glow); filter: brightness(1.1); }
+    .btn-connect.disconnect {
+      background: linear-gradient(135deg, #374151, #1f2937);
+      box-shadow: none;
+    }
+
+    .btn-start {
+      flex: 1; padding: 14px; font-size: 15px;
+      background: linear-gradient(135deg, var(--green), #16a34a);
+      color: #fff;
+      box-shadow: 0 6px 24px var(--green-glow);
+      border-radius: 12px;
+    }
+    .btn-start:hover { filter: brightness(1.1); box-shadow: 0 8px 30px var(--green-glow); }
+    .btn-start:disabled { opacity: 0.35; cursor: not-allowed; filter: none; box-shadow: none; transform: none; }
+
+    .btn-stop {
+      flex: 1; padding: 14px; font-size: 15px;
+      background: linear-gradient(135deg, var(--red), #c0392b);
+      color: #fff;
+      box-shadow: 0 6px 24px var(--red-glow);
+      border-radius: 12px;
+    }
+    .btn-stop:hover { filter: brightness(1.1); box-shadow: 0 8px 30px var(--red-glow); }
+    .btn-stop:disabled { opacity: 0.35; cursor: not-allowed; filter: none; box-shadow: none; transform: none; }
+
+    .controls { display: flex; gap: 12px; }
+
+    /* ── TIMER DISPLAY ── */
+    .timer-card {
+      display: flex; flex-direction: column; align-items: center;
+      padding: 32px 24px;
+      position: relative; overflow: hidden;
+    }
+    .timer-card::before {
+      content: '';
+      position: absolute; inset: 0;
+      background: radial-gradient(ellipse 70% 60% at 50% 50%, rgba(59,130,246,0.05), transparent);
+      pointer-events: none;
+    }
+
+    /* SVG ring */
+    .ring-wrap {
+      position: relative;
+      width: 220px; height: 220px;
+      margin-bottom: 20px;
+    }
+    .ring-svg {
+      position: absolute; inset: 0;
+      transform: rotate(-90deg);
+    }
+    .ring-bg   { fill: none; stroke: rgba(255,255,255,0.06); stroke-width: 6; }
+    .ring-prog {
+      fill: none; stroke-width: 6;
+      stroke: var(--blue);
+      stroke-linecap: round;
+      transition: stroke-dashoffset 0.9s linear, stroke 0.5s;
+    }
+    .ring-prog.recording { stroke: var(--red); }
+    .ring-prog.countdown { stroke: var(--yellow); }
+    .ring-prog.done      { stroke: var(--green); }
+
+    /* Digital clock */
+    .clock-inner {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 4px;
+    }
+    .clock-time {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 48px; font-weight: 700;
+      letter-spacing: -1px;
+      line-height: 1;
+      transition: color 0.4s;
+    }
+    .clock-time.recording { color: var(--red); text-shadow: 0 0 24px var(--red-glow); }
+    .clock-time.countdown { color: var(--yellow); text-shadow: 0 0 18px rgba(245,158,11,0.4); }
+    .clock-time.done      { color: var(--green); }
+
+    .state-badge {
+      display: inline-flex; align-items: center; gap: 5px;
+      background: rgba(255,255,255,0.06); border-radius: 20px;
+      padding: 3px 10px; font-size: 11px; font-weight: 600;
+      letter-spacing: 0.8px; text-transform: uppercase;
+      color: var(--muted);
+      transition: all 0.3s;
+    }
+    .state-badge.recording {
+      background: rgba(255,59,59,0.15); color: var(--red);
+      box-shadow: 0 0 12px rgba(255,59,59,0.2);
+    }
+    .state-badge.countdown {
+      background: rgba(245,158,11,0.15); color: var(--yellow);
+    }
+    .state-badge.done {
+      background: rgba(34,197,94,0.15); color: var(--green);
+    }
+    .rec-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: currentColor;
+    }
+    .rec-dot.blink { animation: blink 1s infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+    /* Session counter */
+    .session-info {
+      display: flex; gap: 24px; margin-top: 4px;
+    }
+    .session-stat { text-align: center; }
+    .session-stat .val {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 20px; font-weight: 700;
+    }
+    .session-stat .lbl { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; margin-top: 2px; }
+
+    /* ── SETTINGS ── */
+    .settings-toggle {
+      display: flex; align-items: center; justify-content: space-between;
+      cursor: pointer; user-select: none;
+    }
+    .settings-toggle span { font-size: 13px; font-weight: 500; }
+    .chevron { font-size: 12px; color: var(--muted); transition: transform 0.25s; }
+    .chevron.open { transform: rotate(180deg); }
+
+    .settings-body {
+      max-height: 0; overflow: hidden;
+      transition: max-height 0.35s ease, margin-top 0.25s;
+    }
+    .settings-body.open { max-height: 300px; margin-top: 16px; }
+
+    .settings-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+    }
+    input[type="number"] {
+      width: 100%;
+      background: rgba(0,0,0,0.3);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 8px;
+      padding: 8px 12px;
+      color: var(--text);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    input[type="number"]:focus { border-color: var(--blue); }
+
+    .toggle-row {
+      display: flex; align-items: center; justify-content: space-between;
+      grid-column: span 2; margin-top: 4px;
+    }
+    .toggle-row label { font-size: 13px; color: var(--text); text-transform: none; letter-spacing: 0; margin: 0; }
+    /* Toggle switch */
+    .switch { position: relative; width: 40px; height: 22px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; inset: 0; border-radius: 22px;
+      background: rgba(255,255,255,0.1);
+      cursor: pointer; transition: background 0.3s;
+    }
+    .slider::before {
+      content: ''; position: absolute;
+      width: 16px; height: 16px; border-radius: 50%;
+      background: #fff; top: 3px; left: 3px;
+      transition: transform 0.3s;
+    }
+    input:checked + .slider { background: var(--green); }
+    input:checked + .slider::before { transform: translateX(18px); }
+
+    /* ── LOG ── */
+    .log-wrap {
+      max-height: 80px; overflow-y: auto;
+      scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.1) transparent;
+    }
+    .log-line {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px; color: var(--muted);
+      line-height: 1.7;
+      animation: fadeIn 0.3s ease;
+    }
+    .log-line.ok  { color: var(--green); }
+    .log-line.err { color: var(--red); }
+    .log-line.warn{ color: var(--yellow); }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; } }
+
+    /* ── NOTIFICATION TOAST ── */
+    .toast {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(80px);
+      background: rgba(15,17,25,0.95); border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 12px; padding: 12px 20px;
+      font-size: 13px; font-weight: 500;
+      backdrop-filter: blur(20px);
+      transition: transform 0.4s cubic-bezier(0.34,1.56,0.64,1), opacity 0.3s;
+      opacity: 0; pointer-events: none; z-index: 99;
+    }
+    .toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <!-- HEADER -->
+  <div class="card header">
+    <div class="header-icon">🔴</div>
+    <div>
+      <h1>OBS Recording Timer</h1>
+      <p>Auto-start · Auto-stop · Loop</p>
+    </div>
+    <div class="status-row">
+      <div class="dot" id="conn-dot"></div>
+      <span id="status-label">Disconnected</span>
+    </div>
+  </div>
+
+  <!-- CONNECTION -->
+  <div class="card">
+    <div class="fields">
+      <div class="conn-grid">
+        <div>
+          <label for="ws-url">WebSocket URL</label>
+          <input type="text" id="ws-url" value="ws://127.0.0.1:4455" placeholder="ws://127.0.0.1:4455" />
+        </div>
+        <button class="btn btn-connect" id="btn-connect" onclick="toggleConnect()">Connect</button>
+      </div>
+      <div>
+        <label for="ws-pass">Password</label>
+        <input type="password" id="ws-pass" placeholder="OBS WebSocket password" />
+      </div>
+    </div>
+  </div>
+
+  <!-- TIMER -->
+  <div class="card timer-card">
+    <div class="ring-wrap">
+      <svg class="ring-svg" viewBox="0 0 220 220" width="220" height="220">
+        <circle class="ring-bg"   cx="110" cy="110" r="100" />
+        <circle class="ring-prog" cx="110" cy="110" r="100" id="ring" />
+      </svg>
+      <div class="clock-inner">
+        <div class="clock-time" id="clock">10:01</div>
+        <div class="state-badge" id="badge">
+          <span class="rec-dot" id="rec-dot"></span>
+          <span id="badge-text">IDLE</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="session-info">
+      <div class="session-stat">
+        <div class="val" id="session-num">0</div>
+        <div class="lbl">Session</div>
+      </div>
+      <div class="session-stat">
+        <div class="val" id="total-time">0:00</div>
+        <div class="lbl">Total Recorded</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CONTROLS -->
+  <div class="card" style="padding:16px 20px;">
+    <div class="controls">
+      <button class="btn btn-start" id="btn-start" onclick="startSession()" disabled>
+        ▶ Start Session
+      </button>
+      <button class="btn btn-stop" id="btn-stop" onclick="stopAll()" disabled>
+        ■ Stop
+      </button>
+    </div>
+  </div>
+
+  <!-- SETTINGS -->
+  <div class="card">
+    <div class="settings-toggle" onclick="toggleSettings()" id="settings-toggle">
+      <span>⚙ Settings</span>
+      <span class="chevron" id="chevron">▼</span>
+    </div>
+    <div class="settings-body" id="settings-body">
+      <div class="settings-grid">
+        <div>
+          <label for="pre-delay">Pre-start delay (s)</label>
+          <input type="number" id="pre-delay" value="5" min="1" max="60" />
+        </div>
+        <div>
+          <label for="rec-mins">Recording minutes</label>
+          <input type="number" id="rec-mins" value="10" min="0" max="59" />
+        </div>
+        <div>
+          <label for="rec-secs">Recording seconds</label>
+          <input type="number" id="rec-secs" value="1" min="0" max="59" />
+        </div>
+        <div></div>
+        <div class="toggle-row">
+          <label for="auto-restart-toggle">Auto-restart after session</label>
+          <label class="switch">
+            <input type="checkbox" id="auto-restart-toggle" checked />
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- LOG -->
+  <div class="card" style="padding:14px 20px;">
+    <label style="margin-bottom:8px;">Activity Log</label>
+    <div class="log-wrap" id="log"></div>
+  </div>
+
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<script>
+// ── STATE ──────────────────────────────────────────────
+let ws = null;
+let connected = false;
+let appState = 'idle'; // idle | countdown | recording | stopping
+let timerInterval = null;
+let secondsLeft = 601;
+let preLeft = 5;
+let sessionCount = 0;
+let totalRecorded = 0; // seconds
+let msgId = 1;
+let pendingRequests = {};
+let authChallenge = null;
+let authSalt = null;
+
+// Ring math
+const RING = document.getElementById('ring');
+const R = 100;
+const CIRC = 2 * Math.PI * R;
+RING.style.strokeDasharray = CIRC;
+RING.style.strokeDashoffset = 0;
+
+function setRing(fraction) {
+  RING.style.strokeDashoffset = CIRC * (1 - fraction);
+}
+
+// ── SETTINGS HELPERS ──────────────────────────────────
+function getPreDelay()    { return parseInt(document.getElementById('pre-delay').value) || 5; }
+function getRecSeconds()  {
+  const m = parseInt(document.getElementById('rec-mins').value) || 10;
+  const s = parseInt(document.getElementById('rec-secs').value) || 1;
+  return m * 60 + s;
+}
+function isAutoRestart()  { return document.getElementById('auto-restart-toggle').checked; }
+
+// ── SETTINGS TOGGLE ────────────────────────────────────
+function toggleSettings() {
+  const body = document.getElementById('settings-body');
+  const chev = document.getElementById('chevron');
+  body.classList.toggle('open');
+  chev.classList.toggle('open');
+}
+
+// ── LOG ────────────────────────────────────────────────
+function log(msg, type = '') {
+  const el = document.getElementById('log');
+  const now = new Date();
+  const ts = now.toTimeString().slice(0,8);
+  const line = document.createElement('div');
+  line.className = 'log-line ' + type;
+  line.textContent = `[${ts}] ${msg}`;
+  el.prepend(line);
+  while (el.children.length > 30) el.removeChild(el.lastChild);
+}
+
+// ── TOAST ──────────────────────────────────────────────
+let toastTimer;
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// ── UI STATE ──────────────────────────────────────────
+function setUIState(state) {
+  appState = state;
+  const clock  = document.getElementById('clock');
+  const badge  = document.getElementById('badge');
+  const bdgtxt = document.getElementById('badge-text');
+  const dot    = document.getElementById('rec-dot');
+  const connDot= document.getElementById('conn-dot');
+  const statLbl= document.getElementById('status-label');
+  const bStart = document.getElementById('btn-start');
+  const bStop  = document.getElementById('btn-stop');
+  const bConn  = document.getElementById('btn-connect');
+
+  // clear all classes
+  clock.className = 'clock-time';
+  badge.className = 'state-badge';
+  RING.className  = 'ring-prog';
+  dot.className   = 'rec-dot';
+
+  if (state === 'idle') {
+    bdgtxt.textContent = 'IDLE';
+    bStart.disabled = !connected;
+    bStop.disabled  = true;
+    connDot.className = connected ? 'dot connected' : 'dot';
+    statLbl.textContent = connected ? 'Connected' : 'Disconnected';
+    setRing(1);
+  } else if (state === 'countdown') {
+    bdgtxt.textContent = 'GET READY';
+    badge.classList.add('countdown');
+    clock.classList.add('countdown');
+    RING.classList.add('countdown');
+    dot.classList.add('blink');
+    bStart.disabled = true;
+    bStop.disabled  = false;
+    connDot.className = 'dot countdown';
+    statLbl.textContent = 'Starting soon…';
+  } else if (state === 'recording') {
+    bdgtxt.textContent = 'RECORDING';
+    badge.classList.add('recording');
+    clock.classList.add('recording');
+    RING.classList.add('recording');
+    dot.classList.add('blink');
+    bStart.disabled = true;
+    bStop.disabled  = false;
+    connDot.className = 'dot recording';
+    statLbl.textContent = 'Recording';
+  } else if (state === 'done') {
+    bdgtxt.textContent = 'DONE';
+    badge.classList.add('done');
+    clock.classList.add('done');
+    RING.classList.add('done');
+    bStart.disabled = true;
+    bStop.disabled  = true;
+    connDot.className = 'dot connected';
+    statLbl.textContent = 'Session complete';
+  }
+}
+
+function updateClock(secs) {
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  document.getElementById('clock').textContent = `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+
+function updateTotalTime(secs) {
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  document.getElementById('total-time').textContent = `${m}:${String(s).padStart(2,'0')}`;
+}
+
+// ── OBS WEBSOCKET v5 ───────────────────────────────────
+async function sha256base64(str) {
+  const buf  = new TextEncoder().encode(str);
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  return btoa(String.fromCharCode(...new Uint8Array(hash)));
+}
+
+function sendOBS(type, data = {}, id = null) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const rid = id || String(msgId++);
+  const msg = { op: 6, d: { requestType: type, requestId: rid, requestData: data } };
+  ws.send(JSON.stringify(msg));
+  return new Promise(res => { pendingRequests[rid] = res; });
+}
+
+async function toggleConnect() {
+  if (connected) {
+    disconnect();
+  } else {
+    await doConnect();
+  }
+}
+
+async function doConnect() {
+  const url  = document.getElementById('ws-url').value.trim() || 'ws://localhost:4455';
+  log(`Connecting to ${url}…`);
+  try {
+    ws = new WebSocket(url);
+  } catch(e) {
+    log('Invalid WebSocket URL.', 'err'); return;
+  }
+
+  ws.onopen = () => { log('WebSocket open — waiting for Hello…'); };
+
+  ws.onmessage = async (evt) => {
+    const msg = JSON.parse(evt.data);
+    const op  = msg.op;
+    const d   = msg.d;
+
+    if (op === 0) { // Hello
+      const rpcVersion = d.rpcVersion;
+      log(`OBS Hello — RPC v${rpcVersion}`);
+      if (d.authentication) {
+        authChallenge = d.authentication.challenge;
+        authSalt      = d.authentication.salt;
+        const pass    = document.getElementById('ws-pass').value;
+        const b64pass = await sha256base64(pass + authSalt);
+        const auth    = await sha256base64(b64pass + authChallenge);
+        ws.send(JSON.stringify({ op: 1, d: { rpcVersion: 1, authentication: auth, eventSubscriptions: 0 } }));
+      } else {
+        ws.send(JSON.stringify({ op: 1, d: { rpcVersion: 1, eventSubscriptions: 0 } }));
+      }
+    } else if (op === 2) { // Identified
+      connected = true;
+      log('Authenticated & identified ✓', 'ok');
+      document.getElementById('btn-connect').textContent = 'Disconnect';
+      document.getElementById('btn-connect').classList.add('disconnect');
+      setUIState('idle');
+      showToast('✅ Connected to OBS!');
+      // check if already recording
+      const res = await sendOBS('GetRecordStatus');
+      if (res && res.responseData && res.responseData.outputActive) {
+        log('OBS is already recording.', 'warn');
+      }
+    } else if (op === 7) { // RequestResponse
+      const rid = d.requestId;
+      if (pendingRequests[rid]) {
+        pendingRequests[rid](d);
+        delete pendingRequests[rid];
+      }
+    } else if (op === 5) { // Event — not used but log errors
+      if (d.eventType === 'RecordStateChanged') {
+        log(`Record state: ${d.eventData?.outputState}`);
+      }
+    }
+  };
+
+  ws.onclose = (e) => {
+    const wasConnected = connected;
+    connected = false;
+    ws = null;
+    if (appState === 'recording' || appState === 'countdown') {
+      clearTimerInterval();
+      log('WebSocket closed mid-session!', 'err');
+      setUIState('idle');
+    } else {
+      setUIState('idle');
+    }
+    document.getElementById('btn-connect').textContent = 'Connect';
+    document.getElementById('btn-connect').classList.remove('disconnect');
+    document.getElementById('btn-start').disabled = true;
+    if (wasConnected) log('Disconnected from OBS.', 'warn');
+  };
+
+  ws.onerror = () => {
+    log('Connection error. Is OBS running?', 'err');
+    showToast('❌ Could not connect to OBS');
+    document.getElementById('conn-dot').className = 'dot error';
+    document.getElementById('status-label').textContent = 'Error';
+  };
+}
+
+function disconnect() {
+  if (ws) ws.close();
+}
+
+// ── TIMER LOGIC ────────────────────────────────────────
+function clearTimerInterval() {
+  clearInterval(timerInterval);
+  timerInterval = null;
+}
+
+async function startSession() {
+  if (!connected) return;
+  preLeft = getPreDelay();
+  updateClock(preLeft);
+  setRing(1);
+  setUIState('countdown');
+  log(`Pre-start countdown: ${preLeft}s…`, 'warn');
+  document.getElementById('session-num').textContent = sessionCount + 1;
+
+  timerInterval = setInterval(async () => {
+    preLeft--;
+    updateClock(preLeft);
+    if (preLeft <= 0) {
+      clearTimerInterval();
+      await beginRecording();
+    }
+  }, 1000);
+}
+
+async function beginRecording() {
+  log('Sending StartRecord to OBS…');
+  const res = await sendOBS('StartRecord');
+  if (res && res.requestStatus && res.requestStatus.result) {
+    sessionCount++;
+    document.getElementById('session-num').textContent = sessionCount;
+    secondsLeft = getRecSeconds();
+    const totalDur = secondsLeft;
+    setUIState('recording');
+    updateClock(secondsLeft);
+    setRing(1);
+    log(`Recording started — Session #${sessionCount} (${fmtDur(totalDur)})`, 'ok');
+    showToast(`🔴 Recording Session #${sessionCount}`);
+
+    timerInterval = setInterval(async () => {
+      secondsLeft--;
+      totalRecorded++;
+      updateClock(secondsLeft);
+      setRing(secondsLeft / totalDur);
+      updateTotalTime(totalRecorded);
+
+      if (secondsLeft <= 0) {
+        clearTimerInterval();
+        await endRecording();
+      }
+    }, 1000);
+  } else {
+    const err = res?.requestStatus?.comment || 'Unknown error';
+    log(`StartRecord failed: ${err}`, 'err');
+    showToast(`❌ Could not start recording: ${err}`);
+    setUIState('idle');
+  }
+}
+
+async function endRecording() {
+  log('Sending StopRecord to OBS…');
+  setUIState('done');
+  updateClock(0);
+  setRing(0);
+  const res = await sendOBS('StopRecord');
+  log(`Session #${sessionCount} complete (${fmtDur(getRecSeconds())}).`, 'ok');
+  showToast(`✅ Session #${sessionCount} complete!`);
+
+  if (isAutoRestart()) {
+    log('Auto-restarting in 1s…');
+    setTimeout(() => {
+      if (connected) startSession();
+    }, 1200);
+  } else {
+    setUIState('idle');
+  }
+}
+
+async function stopAll() {
+  clearTimerInterval();
+  if (appState === 'recording') {
+    log('Manual stop — stopping OBS recording…', 'warn');
+    await sendOBS('StopRecord');
+    showToast('⏹ Recording stopped');
+  } else {
+    log('Countdown cancelled.', 'warn');
+    showToast('⏹ Session cancelled');
+  }
+  setUIState('idle');
+  updateClock(getRecSeconds());
+  setRing(1);
+}
+
+function fmtDur(s) {
+  return `${Math.floor(s/60)}m ${s%60}s`;
+}
+</script>
+</body>
+</html>
