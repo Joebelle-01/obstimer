@@ -446,6 +446,10 @@
           <label for="rec-secs">Recording seconds</label>
           <input type="number" id="rec-secs" value="1" min="0" max="59" />
         </div>
+        <div>
+          <label for="max-sessions">Max sessions (0 = ∞)</label>
+          <input type="number" id="max-sessions" value="0" min="0" max="999" />
+        </div>
         <div></div>
         <div class="toggle-row">
           <label for="auto-restart-toggle">Auto-restart after session</label>
@@ -504,6 +508,7 @@ function getRecSeconds()  {
   return m * 60 + s;
 }
 function isAutoRestart()  { return document.getElementById('auto-restart-toggle').checked; }
+function getMaxSessions() { return parseInt(document.getElementById('max-sessions').value) || 0; }
 
 // ── SETTINGS TOGGLE ────────────────────────────────────
 function toggleSettings() {
@@ -684,10 +689,17 @@ async function doConnect() {
         // OBS confirmed the recording has fully stopped
         if ((state === 'OBS_WEBSOCKET_OUTPUT_STOPPED' || state === 'stopped') && waitingForStopConfirm) {
           waitingForStopConfirm = false;
-          log('OBS confirmed stop ✓ — scheduling next session…', 'ok');
-          if (isAutoRestart() && connected) {
+          const maxSess = getMaxSessions();
+          const limitReached = maxSess > 0 && sessionCount >= maxSess;
+          if (limitReached) {
+            log(`Max sessions (${maxSess}) reached — stopping.`, 'ok');
+            showToast(`✅ All ${maxSess} sessions complete!`);
+            setUIState('idle');
+          } else if (isAutoRestart() && connected) {
+            log('OBS confirmed stop ✓ — scheduling next session…', 'ok');
             setTimeout(() => startSession(), 1200);
           } else {
+            log('OBS confirmed stop ✓', 'ok');
             setUIState('idle');
           }
         }
@@ -810,7 +822,13 @@ async function endRecording() {
     if (waitingForStopConfirm) {
       waitingForStopConfirm = false;
       log('OBS stop event timeout — proceeding anyway…', 'warn');
-      if (isAutoRestart() && connected) {
+      const maxSess = getMaxSessions();
+      const limitReached = maxSess > 0 && sessionCount >= maxSess;
+      if (limitReached) {
+        log(`Max sessions (${maxSess}) reached — stopping.`, 'ok');
+        showToast(`✅ All ${maxSess} sessions complete!`);
+        setUIState('idle');
+      } else if (isAutoRestart() && connected) {
         setTimeout(() => startSession(), 1000);
       } else {
         setUIState('idle');
