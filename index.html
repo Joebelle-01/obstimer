@@ -488,6 +488,8 @@ let pendingRequests = {};
 let authChallenge = null;
 let authSalt = null;
 let waitingForStopConfirm = false;  // prevents double-restart
+let timerEndTime = null;   // wall-clock time when current phase ends
+let timerStartTotalRecorded = 0; // totalRecorded snapshot at recording start
 
 // Ring math
 const RING = document.getElementById('ring');
@@ -749,21 +751,24 @@ function clearTimerInterval() {
 
 async function startSession() {
   if (!connected) return;
-  preLeft = getPreDelay();
-  updateClock(preLeft);
+  const preDelay = getPreDelay();
+  timerEndTime = Date.now() + preDelay * 1000;
+  updateClock(preDelay);
   setRing(1);
   setUIState('countdown');
-  log(`Pre-start countdown: ${preLeft}s…`, 'warn');
+  log(`Pre-start countdown: ${preDelay}s…`, 'warn');
   document.getElementById('session-num').textContent = sessionCount + 1;
 
+  // Use 200ms poll so we react quickly even if tab is throttled
   timerInterval = setInterval(async () => {
-    preLeft--;
-    updateClock(preLeft);
-    if (preLeft <= 0) {
+    const remaining = Math.ceil((timerEndTime - Date.now()) / 1000);
+    preLeft = remaining;
+    updateClock(Math.max(0, remaining));
+    if (remaining <= 0) {
       clearTimerInterval();
       await beginRecording();
     }
-  }, 1000);
+  }, 200);
 }
 
 async function beginRecording() {
@@ -772,26 +777,31 @@ async function beginRecording() {
   if (res && res.requestStatus && res.requestStatus.result) {
     sessionCount++;
     document.getElementById('session-num').textContent = sessionCount;
-    secondsLeft = getRecSeconds();
-    const totalDur = secondsLeft;
+    const totalDur = getRecSeconds();
+    secondsLeft = totalDur;
+    timerEndTime = Date.now() + totalDur * 1000;
+    timerStartTotalRecorded = totalRecorded;
     setUIState('recording');
     updateClock(secondsLeft);
     setRing(1);
     log(`Recording started — Session #${sessionCount} (${fmtDur(totalDur)})`, 'ok');
     showToast(`🔴 Recording Session #${sessionCount}`);
 
+    // Poll every 200ms using wall-clock so browser throttling can't break it
     timerInterval = setInterval(async () => {
-      secondsLeft--;
-      totalRecorded++;
+      const remaining = Math.ceil((timerEndTime - Date.now()) / 1000);
+      secondsLeft = Math.max(0, remaining);
+      const elapsed = Math.floor((Date.now() - (timerEndTime - totalDur * 1000)) / 1000);
+      totalRecorded = timerStartTotalRecorded + Math.min(elapsed, totalDur);
       updateClock(secondsLeft);
       setRing(secondsLeft / totalDur);
       updateTotalTime(totalRecorded);
 
-      if (secondsLeft <= 0) {
+      if (remaining <= 0) {
         clearTimerInterval();
         await endRecording();
       }
-    }, 1000);
+    }, 200);
   } else {
     const err = res?.requestStatus?.comment || 'Unknown error';
     log(`StartRecord failed: ${err}`, 'err');
