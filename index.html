@@ -475,11 +475,43 @@
 <div class="toast" id="toast"></div>
 
 <script>
+// ── WEB WORKER TIMER (immune to browser tab throttling) ────────────────
+// We spin up a dedicated worker that ticks every 200ms on its own thread.
+// setInterval on the main thread can be delayed 30–60 s when the tab is
+// backgrounded, causing OBS to over-record by that amount.
+const _workerBlob = new Blob([`
+  let _iv = null;
+  self.onmessage = function(e) {
+    if (e.data === 'start') {
+      if (_iv) return;
+      _iv = setInterval(function() { self.postMessage('tick'); }, 200);
+    } else if (e.data === 'stop') {
+      clearInterval(_iv);
+      _iv = null;
+    }
+  };
+`], { type: 'application/javascript' });
+const _timerWorker = new Worker(URL.createObjectURL(_workerBlob));
+_timerWorker.onmessage = () => _onWorkerTick();
+let _tickHandler = null;   // function set by startWorkerTimer()
+
+function startWorkerTimer(fn) {
+  _tickHandler = fn;
+  _timerWorker.postMessage('start');
+}
+function stopWorkerTimer() {
+  _timerWorker.postMessage('stop');
+  _tickHandler = null;
+}
+function _onWorkerTick() {
+  if (_tickHandler) _tickHandler();
+}
+
 // ── STATE ──────────────────────────────────────────────
 let ws = null;
 let connected = false;
 let appState = 'idle'; // idle | countdown | recording | stopping
-let timerInterval = null;
+let timerInterval = null; // kept for legacy reference (unused)
 let secondsLeft = 601;
 let preLeft = 5;
 // Persist session count across page reloads
@@ -758,7 +790,7 @@ async function doConnect() {
           const totalDur = getRecSeconds();
           setUIState('recording');
           document.getElementById('session-num').textContent = sessionCount;
-          timerInterval = setInterval(async () => {
+          startWorkerTimer(async () => {
             const rem = Math.ceil((timerEndTime - Date.now()) / 1000);
             secondsLeft = Math.max(0, rem);
             const elapsed = Math.floor((Date.now() - (timerEndTime - totalDur * 1000)) / 1000);
@@ -767,7 +799,7 @@ async function doConnect() {
             setRing(secondsLeft / totalDur);
             updateTotalTime(totalRecorded);
             if (rem <= 0) { clearTimerInterval(); await endRecording(); }
-          }, 200);
+          });
 
         } else {
           // OBS already stopped on its own during the disconnect
@@ -903,7 +935,8 @@ function scheduleReconnect() {
 
 // ── TIMER LOGIC ────────────────────────────────────────
 function clearTimerInterval() {
-  clearInterval(timerInterval);
+  stopWorkerTimer();
+  clearInterval(timerInterval); // safety — stop any stray setInterval too
   timerInterval = null;
 }
 
@@ -917,8 +950,8 @@ async function startSession() {
   log(`Pre-start countdown: ${preDelay}s…`, 'warn');
   // session-num will be updated in beginRecording() only after OBS confirms
 
-  // Use 200ms poll so we react quickly even if tab is throttled
-  timerInterval = setInterval(async () => {
+  // Use Web Worker timer — immune to browser tab throttling
+  startWorkerTimer(async () => {
     const remaining = Math.ceil((timerEndTime - Date.now()) / 1000);
     preLeft = remaining;
     updateClock(Math.max(0, remaining));
@@ -926,7 +959,7 @@ async function startSession() {
       clearTimerInterval();
       await beginRecording();
     }
-  }, 200);
+  });
 }
 
 async function beginRecording() {
@@ -944,8 +977,8 @@ async function beginRecording() {
     log(`Recording started — Session #${sessionCount} (${fmtDur(totalDur)})`, 'ok');
     showToast(`🔴 Recording Session #${sessionCount}`);
 
-    // Poll every 200ms using wall-clock so browser throttling can't break it
-    timerInterval = setInterval(async () => {
+    // Web Worker timer — fires reliably even when tab is backgrounded
+    startWorkerTimer(async () => {
       const remaining = Math.ceil((timerEndTime - Date.now()) / 1000);
       secondsLeft = Math.max(0, remaining);
       const elapsed = Math.floor((Date.now() - (timerEndTime - totalDur * 1000)) / 1000);
@@ -958,7 +991,7 @@ async function beginRecording() {
         clearTimerInterval();
         await endRecording();
       }
-    }, 200);
+    });
   } else {
     const err = res?.requestStatus?.comment || 'Unknown error';
     log(`StartRecord failed: ${err}`, 'err');
