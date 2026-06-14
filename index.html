@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>OBS Auto-Recording Timer</title>
-  <meta name="description" content="Automatically start and stop OBS recording on a 10m 01s loop with a 5-second pre-roll countdown." />
+  <meta name="description" content="Automatically start OBS recording in a loop. Clip length is controlled by OBS Output Timer." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
@@ -26,7 +26,6 @@
       --text:        #e2e8f0;
       --muted:       #64748b;
       --radius:      16px;
-      --dur-rec:     601; /* 10m01s in seconds */
     }
 
     html, body {
@@ -217,6 +216,13 @@
     .ring-prog.countdown { stroke: var(--yellow); }
     .ring-prog.done      { stroke: var(--green); }
 
+    /* Spinning ring animation during recording (since we don't know total duration) */
+    @keyframes ring-spin {
+      from { transform: rotate(-90deg); }
+      to   { transform: rotate(270deg); }
+    }
+    .ring-svg.spinning { animation: ring-spin 4s linear infinite; }
+
     /* Digital clock */
     .clock-inner {
       position: absolute; inset: 0;
@@ -234,6 +240,16 @@
     .clock-time.recording { color: var(--red); text-shadow: 0 0 24px var(--red-glow); }
     .clock-time.countdown { color: var(--yellow); text-shadow: 0 0 18px rgba(245,158,11,0.4); }
     .clock-time.done      { color: var(--green); }
+
+    /* Elapsed label shown under the clock during recording */
+    .elapsed-label {
+      font-size: 10px; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.8px;
+      margin-top: 2px;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .elapsed-label.visible { opacity: 1; }
 
     .state-badge {
       display: inline-flex; align-items: center; gap: 5px;
@@ -303,6 +319,19 @@
     }
     input[type="number"]:focus { border-color: var(--blue); }
 
+    /* OBS hint banner inside settings */
+    .obs-hint {
+      grid-column: span 2;
+      background: rgba(59,130,246,0.08);
+      border: 1px solid rgba(59,130,246,0.2);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 12px;
+      color: #93c5fd;
+      line-height: 1.6;
+    }
+    .obs-hint strong { color: #bfdbfe; }
+
     .toggle-row {
       display: flex; align-items: center; justify-content: space-between;
       grid-column: span 2; margin-top: 4px;
@@ -362,7 +391,7 @@
     <div class="header-icon">🔴</div>
     <div>
       <h1>OBS Recording Timer</h1>
-      <p>Auto-start · Auto-stop · Loop</p>
+      <p>Auto-start · OBS Output Timer · Loop</p>
     </div>
     <div class="status-row">
       <div class="dot" id="conn-dot"></div>
@@ -390,12 +419,13 @@
   <!-- TIMER -->
   <div class="card timer-card">
     <div class="ring-wrap">
-      <svg class="ring-svg" viewBox="0 0 220 220" width="220" height="220">
+      <svg class="ring-svg" id="ring-svg" viewBox="0 0 220 220" width="220" height="220">
         <circle class="ring-bg"   cx="110" cy="110" r="100" />
         <circle class="ring-prog" cx="110" cy="110" r="100" id="ring" />
       </svg>
       <div class="clock-inner">
-        <div class="clock-time" id="clock">10:01</div>
+        <div class="clock-time" id="clock">00:00</div>
+        <div class="elapsed-label" id="elapsed-label">elapsed</div>
         <div class="state-badge" id="badge">
           <span class="rec-dot" id="rec-dot"></span>
           <span id="badge-text">IDLE</span>
@@ -435,17 +465,20 @@
     </div>
     <div class="settings-body" id="settings-body">
       <div class="settings-grid">
+        <!-- OBS hint -->
+        <div class="obs-hint">
+          <strong>📌 OBS Output Timer controls clip length.</strong><br>
+          In OBS: <strong>Tools → Output Timer</strong> → set duration (e.g. 10m 01s) → enable <em>Stop recording</em>.<br>
+          This app will auto-restart the next session after each clip finishes.
+        </div>
+
         <div>
           <label for="pre-delay">Pre-start delay (s)</label>
           <input type="number" id="pre-delay" value="5" min="1" max="60" />
         </div>
         <div>
-          <label for="rec-mins">Recording minutes</label>
-          <input type="number" id="rec-mins" value="10" min="0" max="59" />
-        </div>
-        <div>
-          <label for="rec-secs">Recording seconds</label>
-          <input type="number" id="rec-secs" value="1" min="0" max="59" />
+          <label for="restart-delay">Restart delay (s)</label>
+          <input type="number" id="restart-delay" value="3" min="1" max="30" />
         </div>
         <div>
           <label for="max-sessions">Max sessions (0 = ∞)</label>
@@ -476,9 +509,8 @@
 
 <script>
 // ── WEB WORKER TIMER (immune to browser tab throttling) ────────────────
-// We spin up a dedicated worker that ticks every 200ms on its own thread.
-// setInterval on the main thread can be delayed 30–60 s when the tab is
-// backgrounded, causing OBS to over-record by that amount.
+// Used only for the pre-start countdown. During recording, OBS Output Timer
+// controls the clip length — we simply listen for the STOPPED event.
 const _workerBlob = new Blob([`
   let _iv = null;
   self.onmessage = function(e) {
@@ -493,7 +525,7 @@ const _workerBlob = new Blob([`
 `], { type: 'application/javascript' });
 const _timerWorker = new Worker(URL.createObjectURL(_workerBlob));
 _timerWorker.onmessage = () => _onWorkerTick();
-let _tickHandler = null;   // function set by startWorkerTimer()
+let _tickHandler = null;
 
 function startWorkerTimer(fn) {
   _tickHandler = fn;
@@ -508,23 +540,18 @@ function _onWorkerTick() {
 }
 
 // ── STATE ──────────────────────────────────────────────
-let ws = null;
-let connected = false;
-let appState = 'idle'; // idle | countdown | recording | stopping
-let timerInterval = null; // kept for legacy reference (unused)
-let secondsLeft = 601;
-let preLeft = 5;
-// Persist session count across page reloads
-let sessionCount = parseInt(localStorage.getItem('obs_sessionCount') || '0', 10);
-let totalRecorded = 0; // seconds
-let msgId = 1;
+let ws            = null;
+let connected     = false;
+let appState      = 'idle'; // idle | countdown | recording
+let timerInterval = null;   // elapsed counter during recording
+let sessionCount  = parseInt(localStorage.getItem('obs_sessionCount') || '0', 10);
+let totalRecorded = 0;       // seconds accumulated across all sessions
+let elapsedStart  = null;    // wall-clock ms when current recording began
+let msgId         = 1;
 let pendingRequests = {};
 let authChallenge = null;
-let authSalt = null;
-let waitingForStopConfirm = false;  // prevents double-restart
-let stopFallbackTimer = null;       // tracks the 5s safety timeout in endRecording()
-let timerEndTime = null;   // wall-clock time when current phase ends
-let timerStartTotalRecorded = 0; // totalRecorded snapshot at recording start
+let authSalt      = null;
+let timerEndTime  = null;    // wall-clock end time for pre-start countdown
 const OBS_EVENT_SUBSCRIPTIONS_OUTPUTS = 64;
 
 // ── RECONNECT STATE ────────────────────────────────────
@@ -532,8 +559,6 @@ let reconnectTimer    = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT   = 10;
 const RECONNECT_BASE  = 1000; // ms
-// Saved when WS drops mid-recording so we can resume on reconnect
-let savedRecordingState = null; // { deadline, session, timerStartTotalRecorded }
 
 // ── LOCALSTORAGE HELPERS ───────────────────────────────
 function saveSessionCount(n) {
@@ -547,10 +572,11 @@ function resetSessionCount() { saveSessionCount(0); }
 document.getElementById('session-num').textContent = sessionCount;
 
 // Ring math
-const RING = document.getElementById('ring');
-const R = 100;
-const CIRC = 2 * Math.PI * R;
-RING.style.strokeDasharray = CIRC;
+const RING     = document.getElementById('ring');
+const RING_SVG = document.getElementById('ring-svg');
+const R        = 100;
+const CIRC     = 2 * Math.PI * R;
+RING.style.strokeDasharray  = CIRC;
 RING.style.strokeDashoffset = 0;
 
 function setRing(fraction) {
@@ -565,19 +591,10 @@ function clampInt(value, fallback, min, max) {
   return Math.min(max, Math.max(min, parsed));
 }
 
-function getPreDelay() {
-  return clampInt(document.getElementById('pre-delay').value, 5, 1, 60);
-}
-
-function getRecSeconds()  {
-  const m = clampInt(document.getElementById('rec-mins').value, 10, 0, 59);
-  const s = clampInt(document.getElementById('rec-secs').value, 1, 0, 59);
-  return Math.max(1, m * 60 + s);
-}
-function isAutoRestart()  { return document.getElementById('auto-restart-toggle').checked; }
-function getMaxSessions() {
-  return clampInt(document.getElementById('max-sessions').value, 0, 0, 999);
-}
+function getPreDelay()      { return clampInt(document.getElementById('pre-delay').value, 5, 1, 60); }
+function getRestartDelay()  { return clampInt(document.getElementById('restart-delay').value, 3, 1, 30); }
+function isAutoRestart()    { return document.getElementById('auto-restart-toggle').checked; }
+function getMaxSessions()   { return clampInt(document.getElementById('max-sessions').value, 0, 0, 999); }
 
 // ── SETTINGS TOGGLE ────────────────────────────────────
 function toggleSettings() {
@@ -589,9 +606,9 @@ function toggleSettings() {
 
 // ── LOG ────────────────────────────────────────────────
 function log(msg, type = '') {
-  const el = document.getElementById('log');
+  const el  = document.getElementById('log');
   const now = new Date();
-  const ts = now.toTimeString().slice(0,8);
+  const ts  = now.toTimeString().slice(0, 8);
   const line = document.createElement('div');
   line.className = 'log-line ' + type;
   line.textContent = `[${ts}] ${msg}`;
@@ -612,28 +629,31 @@ function showToast(msg) {
 // ── UI STATE ──────────────────────────────────────────
 function setUIState(state) {
   appState = state;
-  const clock  = document.getElementById('clock');
-  const badge  = document.getElementById('badge');
-  const bdgtxt = document.getElementById('badge-text');
-  const dot    = document.getElementById('rec-dot');
-  const connDot= document.getElementById('conn-dot');
-  const statLbl= document.getElementById('status-label');
-  const bStart = document.getElementById('btn-start');
-  const bStop  = document.getElementById('btn-stop');
-  const bConn  = document.getElementById('btn-connect');
+  const clock    = document.getElementById('clock');
+  const badge    = document.getElementById('badge');
+  const bdgtxt   = document.getElementById('badge-text');
+  const dot      = document.getElementById('rec-dot');
+  const connDot  = document.getElementById('conn-dot');
+  const statLbl  = document.getElementById('status-label');
+  const bStart   = document.getElementById('btn-start');
+  const bStop    = document.getElementById('btn-stop');
+  const elLbl    = document.getElementById('elapsed-label');
 
   // clear all classes
-  clock.className = 'clock-time';
-  badge.className = 'state-badge';
-  RING.className  = 'ring-prog';
-  dot.className   = 'rec-dot';
+  clock.className  = 'clock-time';
+  badge.className  = 'state-badge';
+  RING.className   = 'ring-prog';
+  dot.className    = 'rec-dot';
+  elLbl.className  = 'elapsed-label';
+  RING_SVG.classList.remove('spinning');
 
   if (state === 'idle') {
     bdgtxt.textContent = 'IDLE';
-    bStart.disabled = !connected;
-    bStop.disabled  = true;
-    connDot.className = connected ? 'dot connected' : 'dot';
+    bStart.disabled    = !connected;
+    bStop.disabled     = true;
+    connDot.className  = connected ? 'dot connected' : 'dot';
     statLbl.textContent = connected ? 'Connected' : 'Disconnected';
+    updateClock(0);
     setRing(1);
   } else if (state === 'countdown') {
     bdgtxt.textContent = 'GET READY';
@@ -641,9 +661,9 @@ function setUIState(state) {
     clock.classList.add('countdown');
     RING.classList.add('countdown');
     dot.classList.add('blink');
-    bStart.disabled = true;
-    bStop.disabled  = false;
-    connDot.className = 'dot countdown';
+    bStart.disabled    = true;
+    bStop.disabled     = false;
+    connDot.className  = 'dot countdown';
     statLbl.textContent = 'Starting soon…';
   } else if (state === 'recording') {
     bdgtxt.textContent = 'RECORDING';
@@ -651,28 +671,31 @@ function setUIState(state) {
     clock.classList.add('recording');
     RING.classList.add('recording');
     dot.classList.add('blink');
-    bStart.disabled = true;
-    bStop.disabled  = false;
-    connDot.className = 'dot recording';
+    elLbl.classList.add('visible');   // show "elapsed" label
+    RING_SVG.classList.add('spinning'); // spin ring since total duration is unknown
+    bStart.disabled    = true;
+    bStop.disabled     = false;
+    connDot.className  = 'dot recording';
     statLbl.textContent = 'Recording';
   } else if (state === 'done') {
     bdgtxt.textContent = 'DONE';
     badge.classList.add('done');
     clock.classList.add('done');
     RING.classList.add('done');
-    bStart.disabled = true;
-    bStop.disabled  = true;
-    connDot.className = 'dot connected';
+    bStart.disabled    = true;
+    bStop.disabled     = true;
+    connDot.className  = 'dot connected';
     statLbl.textContent = 'Session complete';
+    setRing(1);
   } else if (state === 'reconnecting') {
     bdgtxt.textContent = 'RECONNECTING';
     badge.classList.add('countdown');
     clock.classList.add('countdown');
     RING.classList.add('countdown');
     dot.classList.add('blink');
-    bStart.disabled = true;
-    bStop.disabled  = false;
-    connDot.className = 'dot reconnecting';
+    bStart.disabled    = true;
+    bStop.disabled     = false;
+    connDot.className  = 'dot reconnecting';
     statLbl.textContent = 'Reconnecting…';
   }
 }
@@ -680,7 +703,8 @@ function setUIState(state) {
 function updateClock(secs) {
   const m = Math.floor(secs / 60);
   const s = secs % 60;
-  document.getElementById('clock').textContent = `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  document.getElementById('clock').textContent =
+    `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
 }
 
 function updateTotalTime(secs) {
@@ -713,21 +737,14 @@ function sendOBS(type, data = {}, id = null) {
 }
 
 async function toggleConnect() {
-  if (connected) {
-    disconnect();
-  } else {
-    await doConnect();
-  }
+  if (connected) { disconnect(); } else { await doConnect(); }
 }
 
 async function doConnect() {
-  const url  = document.getElementById('ws-url').value.trim() || 'ws://localhost:4455';
+  const url = document.getElementById('ws-url').value.trim() || 'ws://localhost:4455';
   log(`Connecting to ${url}…`);
-  try {
-    ws = new WebSocket(url);
-  } catch(e) {
-    log('Invalid WebSocket URL.', 'err'); return;
-  }
+  try { ws = new WebSocket(url); }
+  catch(e) { log('Invalid WebSocket URL.', 'err'); return; }
 
   ws.onopen = () => { log('WebSocket open — waiting for Hello…'); };
 
@@ -737,8 +754,7 @@ async function doConnect() {
     const d   = msg.d;
 
     if (op === 0) { // Hello
-      const rpcVersion = d.rpcVersion;
-      log(`OBS Hello — RPC v${rpcVersion}`);
+      log(`OBS Hello — RPC v${d.rpcVersion}`);
       if (d.authentication) {
         authChallenge = d.authentication.challenge;
         authSalt      = d.authentication.salt;
@@ -749,6 +765,7 @@ async function doConnect() {
       } else {
         ws.send(JSON.stringify({ op: 1, d: { rpcVersion: 1, eventSubscriptions: OBS_EVENT_SUBSCRIPTIONS_OUTPUTS } }));
       }
+
     } else if (op === 2) { // Identified
       connected = true;
       reconnectAttempts = 0;
@@ -758,112 +775,83 @@ async function doConnect() {
       document.getElementById('btn-connect').classList.add('disconnect');
       showToast('✅ Connected to OBS!');
 
-      // Always check what OBS is actually doing right now
-      const statusRes = await sendOBS('GetRecordStatus');
+      const statusRes    = await sendOBS('GetRecordStatus');
       const obsIsRecording = statusRes?.responseData?.outputActive === true;
 
-      if (savedRecordingState) {
-        // ── RECONNECT RESUME PATH ──────────────────────────
-        const snap = savedRecordingState;
-        savedRecordingState = null;
-        const now = Date.now();
-
-        if (obsIsRecording && now >= snap.deadline) {
-          // Deadline already passed — OBS overran. Stop it immediately.
-          log('Reconnected: deadline passed while offline — stopping overrun recording.', 'warn');
-          showToast('⚠️ Stopping overrun recording…');
-          setUIState('done');
-          updateClock(0);
-          setRing(0);
-          waitingForStopConfirm = true;
-          await sendOBS('StopRecord');
-          // RecordStateChanged event will handle auto-restart / limit check
-
-        } else if (obsIsRecording && now < snap.deadline) {
-          // Still time left — resume the countdown from where the wall-clock says
-          const remaining = Math.ceil((snap.deadline - now) / 1000);
-          log(`Reconnected: resuming session #${snap.session} — ${remaining}s left.`, 'ok');
-          showToast('✅ Reconnected — resuming recording!');
-          sessionCount = snap.session;
-          timerEndTime = snap.deadline;
-          timerStartTotalRecorded = snap.timerStartTotalRecorded;
-          const totalDur = getRecSeconds();
-          setUIState('recording');
-          document.getElementById('session-num').textContent = sessionCount;
-          startWorkerTimer(async () => {
-            const rem = Math.ceil((timerEndTime - Date.now()) / 1000);
-            secondsLeft = Math.max(0, rem);
-            const elapsed = Math.floor((Date.now() - (timerEndTime - totalDur * 1000)) / 1000);
-            totalRecorded = timerStartTotalRecorded + Math.min(elapsed, totalDur);
-            updateClock(secondsLeft);
-            setRing(secondsLeft / totalDur);
-            updateTotalTime(totalRecorded);
-            if (rem <= 0) { clearTimerInterval(); await endRecording(); }
-          });
-
-        } else {
-          // OBS already stopped on its own during the disconnect
-          log('Reconnected: OBS recording already stopped while offline.', 'warn');
-          sessionCount = snap.session;
-          setUIState('idle');
-          const maxSess = getMaxSessions();
-          const limitReached = maxSess > 0 && sessionCount >= maxSess;
-          if (limitReached) {
-            log(`Max sessions (${maxSess}) reached — stopping.`, 'ok');
-            showToast(`✅ All ${maxSess} sessions complete!`);
-          } else if (isAutoRestart() && connected) {
-            log('Auto-restarting next session…', 'ok');
-            setTimeout(() => startSession(), 2000);
-          }
-        }
-
-      } else {
-        // ── NORMAL CONNECT PATH ────────────────────────────
+      if (obsIsRecording && appState === 'reconnecting') {
+        // Reconnected while OBS is still recording — just resume listening
+        log('Reconnected — OBS still recording, listening for stop…', 'ok');
+        showToast('✅ Reconnected — waiting for OBS to stop…');
+        setUIState('recording');
+        startElapsedTimer();
+      } else if (obsIsRecording) {
+        // Connected fresh but OBS is already recording externally
+        log('⚠️ OBS is already recording — not managed by this timer.', 'warn');
+        showToast('⚠️ OBS already recording — timer has no control over this clip!');
         setUIState('idle');
-        if (obsIsRecording) {
-          log('⚠️ OBS is already recording — this clip is NOT managed by the timer!', 'warn');
-          showToast('⚠️ OBS already recording — timer has no control over this clip!');
-        }
+      } else {
+        setUIState('idle');
       }
+
     } else if (op === 7) { // RequestResponse
       const rid = d.requestId;
       if (pendingRequests[rid]) {
         pendingRequests[rid](d);
         delete pendingRequests[rid];
       }
+
     } else if (op === 5) { // Event
       if (d.eventType === 'RecordStateChanged') {
         const state = d.eventData?.outputState;
         log(`OBS record state → ${state}`);
 
-        // OBS confirmed the recording has fully stopped
-        if ((state === 'OBS_WEBSOCKET_OUTPUT_STOPPED' || state === 'stopped') && waitingForStopConfirm) {
-          waitingForStopConfirm = false;
-          const maxSess = getMaxSessions();
-          const limitReached = maxSess > 0 && sessionCount >= maxSess;
-          if (limitReached) {
-            log(`Max sessions (${maxSess}) reached — stopping.`, 'ok');
-            showToast(`✅ All ${maxSess} sessions complete!`);
-            resetSessionCount();
-            setUIState('idle');
-          } else if (isAutoRestart() && connected) {
-            log('OBS confirmed stop ✓ — scheduling next session…', 'ok');
-            setTimeout(() => startSession(), 1200);
-          } else {
-            log('OBS confirmed stop ✓', 'ok');
-            setUIState('idle');
+        // ── OBS stopped recording (via its Output Timer or manual) ──
+        if (state === 'OBS_WEBSOCKET_OUTPUT_STOPPED' || state === 'stopped') {
+          if (appState === 'recording') {
+            // Stop the elapsed counter
+            stopElapsedTimer();
+
+            // Accumulate total recorded time
+            if (elapsedStart !== null) {
+              const clipSecs = Math.round((Date.now() - elapsedStart) / 1000);
+              totalRecorded += clipSecs;
+              updateTotalTime(totalRecorded);
+              elapsedStart = null;
+            }
+
+            log(`Session #${sessionCount} complete ✓`, 'ok');
+            showToast(`✅ Session #${sessionCount} complete!`);
+            setUIState('done');
+
+            const maxSess     = getMaxSessions();
+            const limitReached = maxSess > 0 && sessionCount >= maxSess;
+            const restartDelay = getRestartDelay() * 1000;
+
+            if (limitReached) {
+              log(`Max sessions (${maxSess}) reached — stopping.`, 'ok');
+              showToast(`✅ All ${maxSess} sessions complete!`);
+              resetSessionCount();
+              setUIState('idle');
+            } else if (isAutoRestart() && connected) {
+              log(`OBS file saved — restarting in ${getRestartDelay()}s…`, 'warn');
+              setTimeout(() => startSession(), restartDelay);
+            } else {
+              setUIState('idle');
+            }
           }
         }
 
-        // If OBS started recording externally, sync UI
+        // OBS started recording (e.g. externally)
         if (state === 'OBS_WEBSOCKET_OUTPUT_STARTED' || state === 'started') {
-          if (appState !== 'recording') log('OBS started recording externally.', 'warn');
+          if (appState !== 'recording') {
+            log('OBS started recording externally.', 'warn');
+          }
         }
       }
     }
   };
 
-  ws.onclose = (e) => {
+  ws.onclose = () => {
     const wasConnected = connected;
     connected = false;
     ws = null;
@@ -871,25 +859,13 @@ async function doConnect() {
     document.getElementById('btn-connect').classList.remove('disconnect');
     document.getElementById('btn-start').disabled = true;
 
-    if (appState === 'recording') {
-      // Save recording state so we can resume/stop on reconnect
-      savedRecordingState = {
-        deadline:               timerEndTime,
-        session:                sessionCount,
-        timerStartTotalRecorded: timerStartTotalRecorded
-      };
-      clearTimerInterval();
-      log('WebSocket lost mid-recording! Attempting to reconnect…', 'err');
+    if (appState === 'recording' || appState === 'countdown') {
+      stopWorkerTimer();
+      stopElapsedTimer();
+      log('WebSocket lost! Attempting to reconnect…', 'err');
       showToast('⚠️ Connection lost — reconnecting…');
       setUIState('reconnecting');
       scheduleReconnect();
-
-    } else if (appState === 'countdown') {
-      clearTimerInterval();
-      log('WebSocket closed during countdown. Attempting to reconnect…', 'err');
-      setUIState('reconnecting');
-      scheduleReconnect();
-
     } else {
       setUIState('idle');
       if (wasConnected) log('Disconnected from OBS.', 'warn');
@@ -897,8 +873,6 @@ async function doConnect() {
   };
 
   ws.onerror = () => {
-    // Only show the "could not connect" message on a fresh (never-connected) attempt.
-    // If we were already connected, onclose fires right after and handles reconnect.
     if (!connected) {
       log('Connection error. Is OBS running?', 'err');
       showToast('❌ Could not connect to OBS');
@@ -909,9 +883,7 @@ async function doConnect() {
 }
 
 function disconnect() {
-  // Manual disconnect — discard any saved recording state so we don't auto-reconnect
-  savedRecordingState = null;
-  reconnectAttempts   = MAX_RECONNECT; // prevent scheduleReconnect from firing
+  reconnectAttempts = MAX_RECONNECT; // prevent auto-reconnect
   clearTimeout(reconnectTimer);
   if (ws) ws.close();
 }
@@ -922,8 +894,7 @@ function scheduleReconnect() {
   if (reconnectAttempts >= MAX_RECONNECT) {
     log('Max reconnect attempts reached — giving up.', 'err');
     showToast('❌ Could not reconnect to OBS');
-    savedRecordingState = null;
-    reconnectAttempts   = 0;
+    reconnectAttempts = 0;
     setUIState('idle');
     return;
   }
@@ -933,13 +904,23 @@ function scheduleReconnect() {
   reconnectTimer = setTimeout(() => doConnect(), delay);
 }
 
-// ── TIMER LOGIC ────────────────────────────────────────
-function clearTimerInterval() {
-  stopWorkerTimer();
-  clearInterval(timerInterval); // safety — stop any stray setInterval too
+// ── ELAPSED COUNTER (counts up during recording) ───────
+// Replaces the old countdown — since OBS Output Timer owns the cut,
+// we just show how long the current clip has been running.
+function startElapsedTimer() {
+  elapsedStart = Date.now();
+  timerInterval = setInterval(() => {
+    const elapsed = Math.floor((Date.now() - elapsedStart) / 1000);
+    updateClock(elapsed);
+  }, 500);
+}
+
+function stopElapsedTimer() {
+  clearInterval(timerInterval);
   timerInterval = null;
 }
 
+// ── SESSION FLOW ──────────────────────────────────────
 async function startSession() {
   if (!connected) return;
   const preDelay = getPreDelay();
@@ -948,15 +929,13 @@ async function startSession() {
   setRing(1);
   setUIState('countdown');
   log(`Pre-start countdown: ${preDelay}s…`, 'warn');
-  // session-num will be updated in beginRecording() only after OBS confirms
 
-  // Use Web Worker timer — immune to browser tab throttling
+  // Web Worker timer for countdown — immune to tab throttling
   startWorkerTimer(async () => {
     const remaining = Math.ceil((timerEndTime - Date.now()) / 1000);
-    preLeft = remaining;
     updateClock(Math.max(0, remaining));
     if (remaining <= 0) {
-      clearTimerInterval();
+      stopWorkerTimer();
       await beginRecording();
     }
   });
@@ -966,32 +945,13 @@ async function beginRecording() {
   log('Sending StartRecord to OBS…');
   const res = await sendOBS('StartRecord');
   if (res && res.requestStatus && res.requestStatus.result) {
-    saveSessionCount(sessionCount + 1); // persist to localStorage
-    const totalDur = getRecSeconds();
-    secondsLeft = totalDur;
-    timerEndTime = Date.now() + totalDur * 1000;
-    timerStartTotalRecorded = totalRecorded;
+    saveSessionCount(sessionCount + 1);
     setUIState('recording');
-    updateClock(secondsLeft);
-    setRing(1);
-    log(`Recording started — Session #${sessionCount} (${fmtDur(totalDur)})`, 'ok');
+    startElapsedTimer();
+    log(`Recording started — Session #${sessionCount} (OBS Output Timer controls clip length)`, 'ok');
     showToast(`🔴 Recording Session #${sessionCount}`);
-
-    // Web Worker timer — fires reliably even when tab is backgrounded
-    startWorkerTimer(async () => {
-      const remaining = Math.ceil((timerEndTime - Date.now()) / 1000);
-      secondsLeft = Math.max(0, remaining);
-      const elapsed = Math.floor((Date.now() - (timerEndTime - totalDur * 1000)) / 1000);
-      totalRecorded = timerStartTotalRecorded + Math.min(elapsed, totalDur);
-      updateClock(secondsLeft);
-      setRing(secondsLeft / totalDur);
-      updateTotalTime(totalRecorded);
-
-      if (remaining <= 0) {
-        clearTimerInterval();
-        await endRecording();
-      }
-    });
+    // No app-side stop timer — OBS Output Timer will stop it at exactly 10:01.
+    // We listen for RecordStateChanged → STOPPED to handle auto-restart.
   } else {
     const err = res?.requestStatus?.comment || 'Unknown error';
     log(`StartRecord failed: ${err}`, 'err');
@@ -1000,71 +960,25 @@ async function beginRecording() {
   }
 }
 
-async function endRecording() {
-  log('Sending StopRecord to OBS…');
-  setUIState('done');
-  updateClock(0);
-  setRing(0);
-
-  // Mark that we are waiting for OBS to confirm the stop via event
-  waitingForStopConfirm = true;
-
-  const res = await sendOBS('StopRecord');
-  if (!res || !res.requestStatus?.result) {
-    const err = res?.requestStatus?.comment || 'Unknown error';
-    log(`StopRecord warning: ${err}`, 'warn');
-  }
-  log(`Session #${sessionCount} complete (${fmtDur(getRecSeconds())}).`, 'ok');
-  showToast(`✅ Session #${sessionCount} complete!`);
-
-  // Safety fallback: if OBS event never arrives within 5s, proceed anyway
-  stopFallbackTimer = setTimeout(() => {
-    if (waitingForStopConfirm) {
-      waitingForStopConfirm = false;
-      log('OBS stop event timeout — proceeding anyway…', 'warn');
-      const maxSess = getMaxSessions();
-      const limitReached = maxSess > 0 && sessionCount >= maxSess;
-      if (limitReached) {
-        log(`Max sessions (${maxSess}) reached — stopping.`, 'ok');
-        showToast(`✅ All ${maxSess} sessions complete!`);
-        resetSessionCount();
-        setUIState('idle');
-      } else if (isAutoRestart() && connected) {
-        setTimeout(() => startSession(), 1000);
-      } else {
-        setUIState('idle');
-      }
-    }
-  }, 5000);
-}
-
 async function stopAll() {
-  // Cancel all pending machinery immediately
-  waitingForStopConfirm = false;
-  clearTimeout(stopFallbackTimer);
-  stopFallbackTimer   = null;
-  savedRecordingState = null;   // discard reconnect resume state
-  reconnectAttempts   = MAX_RECONNECT; // block any in-flight reconnect from proceeding
+  // Cancel all in-flight machinery
+  stopWorkerTimer();
+  stopElapsedTimer();
   clearTimeout(reconnectTimer);
-  resetSessionCount();          // reset counter for the next run
+  reconnectAttempts = MAX_RECONNECT; // block any reconnect attempt
+  resetSessionCount();
 
-  clearTimerInterval();
   if (appState === 'recording' || appState === 'reconnecting') {
     log('Manual stop — stopping OBS recording…', 'warn');
     await sendOBS('StopRecord');
     showToast('⏹ Recording stopped');
+    elapsedStart = null;
   } else {
     log('Countdown cancelled.', 'warn');
     showToast('⏹ Session cancelled');
   }
   reconnectAttempts = 0; // reset so user can connect again normally
   setUIState('idle');
-  updateClock(getRecSeconds());
-  setRing(1);
-}
-
-function fmtDur(s) {
-  return `${Math.floor(s/60)}m ${s%60}s`;
 }
 </script>
 </body>
